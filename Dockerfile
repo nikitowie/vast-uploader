@@ -7,6 +7,7 @@
 
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
+ARG GITHUB_REPOSITORY="nikitowie/vast-uploader"
 LABEL org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}"
 LABEL org.opencontainers.image.description="ComfyUI Wan 2.2 I2V + MMAudio — Vast.ai Serverless"
 
