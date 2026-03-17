@@ -10,7 +10,8 @@ Exposes:
 
 Request body for /generate/sync:
   {
-    "workflow_json": { ... },     // ComfyUI API-format prompt (required)
+    "workflow_json": { ... },     // ComfyUI prompt — API format OR UI format (auto-detected)
+    "input_image":  "<base64>",   // optional: PNG/JPEG to inject into all LoadImage nodes
     "loras": [                    // optional runtime LoRAs to download
       {
         "name": "my_lora.safetensors",
@@ -19,6 +20,11 @@ Request body for /generate/sync:
       }
     ]
   }
+
+Workflow format notes:
+  - API format:  {"1": {"class_type": "...", "inputs": {...}}, ...}
+  - UI format:   {"nodes": [...], "links": [...], ...}
+  Both are accepted. UI format is automatically converted to API format.
 
 Response:
   {
@@ -82,9 +88,9 @@ COMFYUI_PORT = int(os.getenv("COMFYUI_PORT", "8188"))
 COMFYUI_URL  = f"http://{COMFYUI_HOST}:{COMFYUI_PORT}"
 COMFYUI_WS   = f"ws://{COMFYUI_HOST}:{COMFYUI_PORT}"
 
-OUTPUT_DIR     = Path(os.getenv("OUTPUT_DIR", "/opt/ComfyUI/output"))
-MAX_WAIT       = int(os.getenv("MAX_WAIT_SECONDS", "600"))
-HANDLER_PORT   = int(os.getenv("HANDLER_PORT", "8000"))
+OUTPUT_DIR      = Path(os.getenv("OUTPUT_DIR", "/opt/ComfyUI/output"))
+MAX_WAIT        = int(os.getenv("MAX_WAIT_SECONDS", "600"))
+HANDLER_PORT    = int(os.getenv("HANDLER_PORT", "8000"))
 BUILD_INFO_PATH = Path("/opt/build-info.json")
 
 # ---------------------------------------------------------------------------
@@ -99,13 +105,14 @@ class LoraSpec(BaseModel):
 
 class GenerateRequest(BaseModel):
     workflow_json: dict
+    input_image: Optional[str] = None   # base64-encoded PNG or JPEG
     loras: Optional[list[LoraSpec]] = []
 
 
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="ComfyUI Serverless Handler", version="1.0.0")
+app = FastAPI(title="ComfyUI Serverless Handler", version="1.1.0")
 
 
 @app.exception_handler(Exception)
@@ -160,23 +167,44 @@ async def generate_sync(request: GenerateRequest):
     logger.info(f"[{job_id}] New job received")
     t_start = time.time()
 
-    # 1. Ensure LoRAs are locally available
-    if request.loras:
-        logger.info(f"[{job_id}] Ensuring {len(request.loras)} LoRA(s)...")
-        for lora in request.loras:
-            try:
-                ensure_lora(lora.name, lora.url, lora.checksum)
-            except RuntimeError as e:
-                raise HTTPException(status_code=400, detail=f"LoRA prep failed: {e}")
-
-    # 2. Submit prompt to ComfyUI
-    client_id = str(uuid.uuid4())
-    prompt_payload = {
-        "prompt": request.workflow_json,
-        "client_id": client_id,
-    }
-
     async with httpx.AsyncClient() as client:
+
+        # 1. Ensure LoRAs are locally available
+        if request.loras:
+            logger.info(f"[{job_id}] Ensuring {len(request.loras)} LoRA(s)...")
+            for lora in request.loras:
+                try:
+                    ensure_lora(lora.name, lora.url, lora.checksum)
+                except RuntimeError as e:
+                    raise HTTPException(status_code=400, detail=f"LoRA prep failed: {e}")
+
+        # 2. Detect and convert workflow format (UI → API if needed)
+        try:
+            api_workflow = await _prepare_workflow(request.workflow_json, client, job_id)
+        except Exception as e:
+            logger.error(f"[{job_id}] Workflow conversion failed: {e}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Workflow conversion failed: {e}")
+
+        # 3. Upload input_image and inject into LoadImage nodes
+        if request.input_image:
+            try:
+                img_filename = await _upload_image_b64(request.input_image, client, job_id)
+                injected = 0
+                for node_id, node in api_workflow.items():
+                    if node.get("class_type") == "LoadImage":
+                        node["inputs"]["image"] = img_filename
+                        injected += 1
+                logger.info(f"[{job_id}] Injected image '{img_filename}' into {injected} LoadImage node(s)")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Image upload failed: {e}")
+
+        # 4. Submit prompt to ComfyUI
+        client_id = str(uuid.uuid4())
+        prompt_payload = {
+            "prompt": api_workflow,
+            "client_id": client_id,
+        }
+
         try:
             resp = await client.post(
                 f"{COMFYUI_URL}/prompt",
@@ -197,7 +225,7 @@ async def generate_sync(request: GenerateRequest):
 
     logger.info(f"[{job_id}] Submitted — prompt_id={prompt_id}, client_id={client_id}")
 
-    # 3. Wait for completion via WebSocket
+    # 5. Wait for completion via WebSocket
     try:
         outputs = await _wait_for_completion(job_id, client_id, prompt_id)
     except asyncio.TimeoutError:
@@ -212,6 +240,151 @@ async def generate_sync(request: GenerateRequest):
         "elapsed_seconds": round(t_elapsed, 1),
         "outputs": outputs,
     }
+
+
+# ---------------------------------------------------------------------------
+# Workflow format detection and conversion
+# ---------------------------------------------------------------------------
+
+async def _prepare_workflow(workflow: dict, client: httpx.AsyncClient, job_id: str) -> dict:
+    """
+    Detect whether workflow is in UI format (nodes list) or API format (node dict).
+    Convert from UI format to API format if needed.
+    """
+    if "nodes" in workflow and isinstance(workflow.get("nodes"), list):
+        logger.info(f"[{job_id}] UI-format workflow detected — converting to API format")
+        api = await _ui_to_api(workflow, client, job_id)
+        logger.info(f"[{job_id}] Converted {len(api)} nodes to API format")
+        return api
+    return workflow
+
+
+async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) -> dict:
+    """
+    Convert a ComfyUI UI-format workflow (exported from the web interface) to
+    the API-format prompt dict that /prompt expects.
+
+    UI format:  {"nodes": [{id, type, widgets_values, inputs:[{name, link}]}, ...], "links": [...]}
+    API format: {"<node_id>": {"class_type": "...", "inputs": {"input_name": value_or_link}}}
+
+    Links in API format are [source_node_id, source_output_slot] lists.
+    """
+    nodes = ui_workflow.get("nodes", [])
+    links = ui_workflow.get("links", [])
+
+    # link_id -> [source_node_id, source_output_slot]
+    link_map: dict[int, list] = {
+        link[0]: [link[1], link[2]] for link in links
+    }
+
+    # Fetch object_info to resolve widget input names
+    all_info: dict = {}
+    try:
+        resp = await client.get(f"{COMFYUI_URL}/object_info", timeout=30.0)
+        all_info = resp.json()
+        logger.debug(f"[{job_id}] object_info fetched for {len(all_info)} node types")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Could not fetch object_info: {e} — widget mapping may be incomplete")
+
+    def get_widget_names(node_type: str) -> list[str]:
+        """
+        Return ordered list of widget (non-linkable) input names for a node type.
+        Widget inputs are STRING, INT, FLOAT, BOOLEAN, COMBO (list), IMAGEUPLOAD.
+        Linkable inputs (IMAGE, LATENT, MODEL, etc.) are excluded.
+        """
+        info = all_info.get(node_type)
+        if not info:
+            return []
+        required = info.get("input", {}).get("required", {}) or {}
+        optional = info.get("input", {}).get("optional", {}) or {}
+        names = []
+        for name, inp_def in {**required, **optional}.items():
+            if not isinstance(inp_def, (list, tuple)) or not inp_def:
+                continue
+            inp_type = inp_def[0]
+            # COMBO (dropdown) is a list; primitives are named types
+            if isinstance(inp_type, list) or inp_type in (
+                "STRING", "INT", "FLOAT", "BOOLEAN", "IMAGEUPLOAD"
+            ):
+                names.append(name)
+        return names
+
+    api_prompt: dict[str, dict] = {}
+
+    for node in nodes:
+        node_id   = str(node.get("id", ""))
+        node_type = node.get("type", "")
+
+        # Skip non-executable nodes
+        if not node_type or node_type in ("Note", "Reroute"):
+            continue
+
+        widgets_values = node.get("widgets_values") or []
+        node_inputs    = node.get("inputs") or []
+
+        inputs: dict = {}
+
+        # Resolve linked inputs
+        for inp in node_inputs:
+            link_id = inp.get("link")
+            if link_id is not None and link_id in link_map:
+                inputs[inp["name"]] = link_map[link_id]
+
+        # Map widget values → input names (in schema order, skipping linked inputs)
+        widget_names = get_widget_names(node_type)
+        widget_idx = 0
+        for wname in widget_names:
+            if wname not in inputs:
+                if widget_idx < len(widgets_values):
+                    inputs[wname] = widgets_values[widget_idx]
+                widget_idx += 1
+
+        api_prompt[node_id] = {
+            "class_type": node_type,
+            "inputs": inputs,
+        }
+
+    return api_prompt
+
+
+# ---------------------------------------------------------------------------
+# Image upload helper
+# ---------------------------------------------------------------------------
+
+async def _upload_image_b64(b64_data: str, client: httpx.AsyncClient, job_id: str) -> str:
+    """
+    Decode a base64 image and upload it to ComfyUI's /upload/image endpoint.
+    Returns the filename assigned by ComfyUI.
+    """
+    try:
+        img_bytes = base64.b64decode(b64_data)
+    except Exception as e:
+        raise ValueError(f"Invalid base64 image data: {e}")
+
+    # Detect image format from magic bytes
+    if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        ext, mime = "png", "image/png"
+    elif img_bytes[:3] == b'\xff\xd8\xff':
+        ext, mime = "jpg", "image/jpeg"
+    elif img_bytes[:4] == b'RIFF' and img_bytes[8:12] == b'WEBP':
+        ext, mime = "webp", "image/webp"
+    else:
+        ext, mime = "png", "image/png"
+
+    filename = f"input_{uuid.uuid4().hex[:12]}.{ext}"
+    logger.info(f"[{job_id}] Uploading input image as '{filename}' ({len(img_bytes)//1024}KB)")
+
+    resp = await client.post(
+        f"{COMFYUI_URL}/upload/image",
+        files={"image": (filename, img_bytes, mime)},
+        data={"overwrite": "true"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    assigned_name = result.get("name", filename)
+    logger.info(f"[{job_id}] Image uploaded → '{assigned_name}'")
+    return assigned_name
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +427,6 @@ async def _wait_for_completion(
                 if msg_type == "executing":
                     node = data["data"].get("node")
                     if node is None and data["data"].get("prompt_id") == prompt_id:
-                        # prompt_id executed, queue empty — done
                         logger.info(f"[{job_id}] Execution complete signal received")
                         break
 
@@ -277,7 +449,6 @@ async def _wait_for_completion(
     except websockets.exceptions.ConnectionClosed as e:
         raise HTTPException(status_code=502, detail=f"WebSocket closed unexpectedly: {e}")
 
-    # Fetch history and collect output files
     return await _collect_outputs(job_id, prompt_id)
 
 
@@ -304,7 +475,7 @@ async def _collect_outputs(job_id: str, prompt_id: str) -> list[dict]:
                     continue
 
                 subfolder = item.get("subfolder", "")
-                filename = item["filename"]
+                filename  = item["filename"]
                 file_path = OUTPUT_DIR / subfolder / filename if subfolder else OUTPUT_DIR / filename
 
                 if not file_path.exists():
@@ -331,14 +502,14 @@ async def _collect_outputs(job_id: str, prompt_id: str) -> list[dict]:
 def _guess_mime(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     return {
-        ".mp4": "video/mp4",
+        ".mp4":  "video/mp4",
         ".webm": "video/webm",
-        ".gif": "image/gif",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
+        ".gif":  "image/gif",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
         ".jpeg": "image/jpeg",
-        ".wav": "audio/wav",
-        ".mp3": "audio/mpeg",
+        ".wav":  "audio/wav",
+        ".mp3":  "audio/mpeg",
     }.get(ext, "application/octet-stream")
 
 
