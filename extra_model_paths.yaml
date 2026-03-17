@@ -1,0 +1,46 @@
+# extra_model_paths.yaml
+# Tells ComfyUI where to look for models beyond the defaults.
+#
+# Key mappings:
+#   unet / diffusion_models → models/unet/     (GGUF checkpoint files)
+#   clip / text_encoders    → models/text_encoders/  (umt5, t5, etc.)
+#   clip_vision             → models/clip_vision/
+#   vae                     → models/vae/
+#   loras                   → models/loras/
+#
+# Custom node folder types (registered by the nodes themselves):
+#   mmaudio   — registered by comfyui-mmaudio   → models/mmaudio/
+#   vfi_models — registered by ComfyUI-VFI      → models/vfi_models/
+# These do NOT need to appear here; nodes register their own paths.
+#
+# Reference: https://github.com/comfyanonymous/ComfyUI/blob/master/folder_paths.py
+
+comfyui:
+    base_path: /opt/ComfyUI/
+
+    # Diffusion models — SmoothMix Wan 2.2 safetensors (UNETLoader, core)
+    # UNETLoader looks in "diffusion_models" by default.
+    diffusion_models:  models/diffusion_models/
+
+    # GGUF models (UnetLoaderGGUF from comfyui-gguf) — kept for compatibility
+    # Not used in current workflow but available if GGUF nodes are re-enabled
+    unet:              models/unet/
+
+    # Text encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors)
+    clip:              models/text_encoders/
+    text_encoders:     models/text_encoders/
+
+    # CLIP Vision (clip_vision_h.safetensors)
+    clip_vision:       models/clip_vision/
+
+    # VAE (Wan2_1_VAE_fp32.safetensors)
+    vae:               models/vae/
+
+    # LoRA (SmoothMix + runtime LoRAs)
+    loras:             models/loras/
+
+    # Standard paths (kept for any core nodes that may load from here)
+    checkpoints:       models/checkpoints/
+    controlnet:        models/controlnet/
+    upscale_models:    models/upscale_models/
+    ipadapter:         models/ipadapter/

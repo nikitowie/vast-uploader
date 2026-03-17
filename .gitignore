@@ -1,0 +1,42 @@
+# Secrets
+.env
+.env.local
+
+# Claude Code local files
+.claude/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Local model files
+models/
+*.gguf
+*.safetensors
+*.pkl
+*.ckpt
+*.pt
+
+# Build artifacts
+*.log
+*.tmp
+*.bak
+
+# Large media outputs
+output/
+input/
+*.mp4
+*.webm

@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# GitHub Actions (no need in image)
+.github
+
+# Local development / test artifacts
+*.log
+*.tmp
+*.bak
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Secrets — never bake in
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editor
+.idea
+.vscode
+*.swp
+
+# Local model files (models downloaded at provisioning time, not from context)
+models/
+*.gguf
+*.safetensors
+*.pkl
+*.ckpt
+*.pt
+
+# Large input/output files
+input/
+output/
+*.mp4
+*.webm
+*.gif
+
+# README (not needed in image runtime)
+README.md
+CHANGELOG.md
+
+# Test artifacts
+tests/__pycache__

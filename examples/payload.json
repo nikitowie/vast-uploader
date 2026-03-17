@@ -1,0 +1,34 @@
+{
+  "_comment": "Example POST payload for POST /generate/sync",
+  "_note": "workflow_json should contain the ComfyUI API-format prompt (the 'nodes' key from the workflow file, keyed by node ID as strings). Replace with your actual workflow. loras[] is optional — only needed for LoRAs not in models/loras/ already.",
+
+  "workflow_json": {
+    "_comment": "Paste your ComfyUI API-format workflow here. This is the 'prompt' object (dict keyed by node_id strings). You can get it from ComfyUI UI: Menu → Queue Prompt → copy the API JSON.",
+    "125": {
+      "class_type": "MMAudioFeatureUtilsLoader",
+      "inputs": {
+        "vae_model":         "mmaudio_vae_44k_fp16.safetensors",
+        "synchformer_model": "mmaudio_synchformer_fp16.safetensors",
+        "clip_model":        "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+        "feature_utils_dtype": "fp16",
+        "precision": "44k"
+      }
+    },
+    "124": {
+      "class_type": "MMAudioModelLoader",
+      "inputs": {
+        "model": "mmaudio_large_44k_v2_fp16.safetensors",
+        "dtype": "fp16"
+      }
+    }
+  },
+
+  "loras": [
+    {
+      "_comment": "Example of a RUNTIME lora download (not in models/loras/ yet). Remove this if all LoRAs are pre-downloaded via provisioning.sh.",
+      "name": "my_custom_lora_v1.safetensors",
+      "url":  "https://civitai.com/api/download/models/XXXXX",
+      "checksum": "optional_sha256_hex_or_omit_entirely"
+    }
+  ]
+}

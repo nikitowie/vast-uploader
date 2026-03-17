@@ -1,0 +1,194 @@
+# =============================================================================
+# build-and-push.yml — Build and push Docker image via GitHub Actions
+#
+# Triggers:
+#   - Push to main branch  → builds and pushes with tag "latest" + short SHA
+#   - Push a version tag   → builds and pushes with that tag (e.g. "v1.2.0")
+#   - Manual dispatch      → builds with user-supplied tag (default: "latest")
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   DOCKER_USERNAME   — Docker Hub username  (or GHCR: use github.actor)
+#   DOCKER_PASSWORD   — Docker Hub password / access token
+#                       (for GHCR: leave empty — uses GITHUB_TOKEN automatically)
+#
+# Required GitHub Variables (Settings → Variables → Actions):
+#   REGISTRY      — "docker.io" or "ghcr.io"
+#   IMAGE_NAME    — e.g. "myuser/vast-comfyui-wan"  (Docker Hub)
+#                        "myorg/vast-comfyui-wan"   (GHCR: owner/name)
+#
+# Output image paths:
+#   Docker Hub:  docker.io/<IMAGE_NAME>:<tag>
+#   GHCR:        ghcr.io/<IMAGE_NAME>:<tag>
+#
+# Notes:
+#   - Uses Docker layer cache (GitHub Actions Cache) to speed up rebuilds
+#   - Multi-platform is NOT enabled by default (amd64 only — Vast.ai GPUs)
+#   - Image can be large (10-15 GB without models); first build may take 30-60 min
+# =============================================================================
+
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to push (default: latest)"
+        required: false
+        default: "latest"
+      skip_cache:
+        description: "Bypass Docker layer cache"
+        type: boolean
+        default: false
+
+# Prevent concurrent builds on the same branch (cancel older run)
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY:   ${{ vars.REGISTRY   || 'docker.io' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'changeme/vast-comfyui-wan' }}
+
+jobs:
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write   # required for GHCR push
+
+    steps:
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Free disk space — GitHub-hosted runners have ~14 GB free by default.
+      # The build requires more; this frees ~10 GB additional.
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h
+
+      # -----------------------------------------------------------------------
+      - name: Set up QEMU (for potential multi-arch future use)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      # -----------------------------------------------------------------------
+      # Compute image tags
+      - name: Compute image tags and labels
+        id: meta
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Triggered by a version tag push (e.g. v1.2.0)
+            VERSION_TAG="${{ github.ref_name }}"
+            TAGS="${IMAGE}:${VERSION_TAG},${IMAGE}:${SHORT_SHA}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            DISPATCH_TAG="${{ inputs.tag }}"
+            TAGS="${IMAGE}:${DISPATCH_TAG},${IMAGE}:${SHORT_SHA}"
+          else
+            # main branch push
+            TAGS="${IMAGE}:latest,${IMAGE}:${SHORT_SHA}"
+          fi
+
+          echo "tags=${TAGS}"       >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"      >> "$GITHUB_OUTPUT"
+
+          # Human-readable summary
+          echo "### Build targets" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "REGISTRY:   ${REGISTRY}" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE:      ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "TAGS:       ${TAGS}" >> "$GITHUB_STEP_SUMMARY"
+          echo "COMMIT SHA: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # -----------------------------------------------------------------------
+      # Login — Docker Hub
+      - name: Login to Docker Hub
+        if: env.REGISTRY == 'docker.io'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Login — GitHub Container Registry
+      - name: Login to GHCR
+        if: env.REGISTRY == 'ghcr.io'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Login — Custom registry
+      - name: Login to custom registry
+        if: env.REGISTRY != 'docker.io' && env.REGISTRY != 'ghcr.io'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # -----------------------------------------------------------------------
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # amd64 only — Vast.ai GPU nodes are x86_64
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          # GitHub Actions cache — speeds up layer reuse between runs
+          cache-from: ${{ inputs.skip_cache == 'true' && 'type=inline' || 'type=gha' }}
+          cache-to:   type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.run_id }}
+            GIT_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      # -----------------------------------------------------------------------
+      - name: Output image path for Vast.ai
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          SHA_TAG="${{ steps.meta.outputs.sha_tag }}"
+
+          echo "## Image ready for Vast.ai" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Paste this into **Vast.ai → Edit Template → Image Path:Tag**:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}:${SHA_TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Or use the \`latest\` tag if that was pushed:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "---"
+          echo "Image: ${IMAGE}:${SHA_TAG}"
