@@ -311,18 +311,24 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
     except Exception as e:
         logger.warning(f"[{job_id}] Could not fetch object_info: {e} — widget mapping may be incomplete")
 
-    def get_widget_names(node_type: str) -> list[str]:
+    def get_widget_names(node_type: str) -> list:
         """
         Return ordered list of widget (non-linkable) input names for a node type.
         Widget inputs are STRING, INT, FLOAT, BOOLEAN, COMBO (list), IMAGEUPLOAD.
         Linkable inputs (IMAGE, LATENT, MODEL, etc.) are excluded.
+
+        Some INT/FLOAT inputs carry {"control_after_generate": True} in their
+        options dict.  ComfyUI's frontend creates an *extra* hidden dropdown
+        widget (e.g. "randomize / fixed / increment") immediately after such an
+        input in widgets_values, but this extra slot does NOT appear in
+        object_info.  We emit None as a placeholder so widget_idx stays in sync.
         """
         info = all_info.get(node_type)
         if not info:
             return []
         required = info.get("input", {}).get("required", {}) or {}
         optional = info.get("input", {}).get("optional", {}) or {}
-        names = []
+        names: list = []
         for name, inp_def in {**required, **optional}.items():
             if not isinstance(inp_def, (list, tuple)) or not inp_def:
                 continue
@@ -331,6 +337,11 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
                 "STRING", "INT", "FLOAT", "BOOLEAN", "IMAGEUPLOAD"
             ):
                 names.append(name)
+                # Extra hidden control-mode slot produced by the frontend
+                if inp_type in ("INT", "FLOAT") and len(inp_def) > 1:
+                    opts = inp_def[1]
+                    if isinstance(opts, dict) and opts.get("control_after_generate"):
+                        names.append(None)  # placeholder: advance idx, don't store
         return names
 
     def build_node_inputs(node: dict, cur_link_map: dict) -> dict:
@@ -366,10 +377,11 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
             )
             widget_idx = promoted_not_in_info
             for wname in widget_names:
-                if wname not in inputs:
+                # None = placeholder for a hidden control-mode slot — skip storing
+                if wname is not None and wname not in inputs:
                     if widget_idx < len(widgets_values):
                         inputs[wname] = widgets_values[widget_idx]
-                widget_idx += 1  # always advance — even for linked widget inputs
+                widget_idx += 1  # always advance — even for linked/placeholder slots
 
         return inputs
 
