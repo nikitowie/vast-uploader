@@ -82,11 +82,11 @@ clone_node \
 # 3. ComfyUI-WanVideoWrapper (kijai)
 #    Nodes: NormalizeAudioLoudness (+ full Wan video pipeline)
 #    cnr_id: ComfyUI-WanVideoWrapper | aux_id: kijai/ComfyUI-WanVideoWrapper
-#    commit: 90c3bbb
+#    commit: df8f3e4 (updated from 90c3bbb — adds NormalizeAudioLoudness, added 2025-08-27)
 clone_node \
     "https://github.com/kijai/ComfyUI-WanVideoWrapper" \
     "ComfyUI-WanVideoWrapper" \
-    "90c3bbb6c2e4ff5e05305e765d007d5e58428ce4"
+    "df8f3e49daaad117cf3090cc916c83f3d001494c"
 
 # 4. ComfyUI-MMAudio (kijai)
 #    Nodes: MMAudioModelLoader, MMAudioFeatureUtilsLoader
