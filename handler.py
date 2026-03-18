@@ -264,10 +264,14 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
     Convert a ComfyUI UI-format workflow (exported from the web interface) to
     the API-format prompt dict that /prompt expects.
 
-    UI format:  {"nodes": [{id, type, widgets_values, inputs:[{name, link}]}, ...], "links": [...]}
+    UI format:  {"nodes": [...], "links": [...], "definitions": {"subgraphs": [...]}}
     API format: {"<node_id>": {"class_type": "...", "inputs": {"input_name": value_or_link}}}
 
-    Links in API format are [source_node_id, source_output_slot] lists.
+    Handles:
+    - UI-only decorative nodes (Label, Note Plus, etc.) → skipped
+    - Subgraph / group nodes (UUID types) → expanded inline to inner nodes
+    - dict-format widgets_values (VHS_VideoCombine, etc.) → merged by name
+    - Links → ["source_node_id_str", source_slot] references
     """
     nodes = ui_workflow.get("nodes", [])
     links = ui_workflow.get("links", [])
@@ -278,7 +282,13 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
         link[0]: [str(link[1]), link[2]] for link in links
     }
 
-    # Fetch object_info to resolve widget input names
+    # Build subgraph lookup: uuid_type -> subgraph definition dict
+    subgraphs: dict[str, dict] = {
+        sg["id"]: sg
+        for sg in ui_workflow.get("definitions", {}).get("subgraphs", [])
+    }
+
+    # Fetch object_info to resolve widget input names and detect UI-only nodes
     all_info: dict = {}
     try:
         resp = await client.get(f"{COMFYUI_URL}/object_info", timeout=30.0)
@@ -303,41 +313,26 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
             if not isinstance(inp_def, (list, tuple)) or not inp_def:
                 continue
             inp_type = inp_def[0]
-            # COMBO (dropdown) is a list; primitives are named types
             if isinstance(inp_type, list) or inp_type in (
                 "STRING", "INT", "FLOAT", "BOOLEAN", "IMAGEUPLOAD"
             ):
                 names.append(name)
         return names
 
-    api_prompt: dict[str, dict] = {}
-
-    for node in nodes:
-        node_id   = str(node.get("id", ""))
+    def build_node_inputs(node: dict, cur_link_map: dict) -> dict:
+        """Build the inputs dict for a single node using cur_link_map for link resolution."""
         node_type = node.get("type", "")
-
-        # Skip non-executable nodes (built-in decorators + any type not registered in ComfyUI)
-        if not node_type or node_type in ("Note", "Reroute"):
-            continue
-        if all_info and node_type not in all_info:
-            logger.debug(f"[{job_id}] Skipping UI-only/unknown node {node_id} type={node_type!r}")
-            continue
-
-        raw_wv        = node.get("widgets_values")
-        node_inputs   = node.get("inputs") or []
-
+        raw_wv    = node.get("widgets_values")
         inputs: dict = {}
 
-        # Resolve linked inputs
-        for inp in node_inputs:
+        # Resolve linked inputs first
+        for inp in (node.get("inputs") or []):
             link_id = inp.get("link")
-            if link_id is not None and link_id in link_map:
-                inputs[inp["name"]] = link_map[link_id]
+            if link_id is not None and link_id in cur_link_map:
+                inputs[inp["name"]] = cur_link_map[link_id]
 
-        # Map widget values → input names
-        # widgets_values can be a list (index-ordered) or a dict (name→value) in newer exports
+        # Map widget values
         if isinstance(raw_wv, dict):
-            # Dict format: keys are already input names — merge directly, don't overwrite links
             for wname, wval in raw_wv.items():
                 if wname not in inputs:
                     inputs[wname] = wval
@@ -351,10 +346,89 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
                         inputs[wname] = widgets_values[widget_idx]
                     widget_idx += 1
 
-        api_prompt[node_id] = {
-            "class_type": node_type,
-            "inputs": inputs,
+        return inputs
+
+    # -----------------------------------------------------------------------
+    # Phase 1: Expand subgraph (group) nodes.
+    # Update link_map so outer output links from group nodes point to inner
+    # node outputs. Repeat until stable (handles chains: groupA → groupB).
+    # -----------------------------------------------------------------------
+    for _pass in range(5):
+        changed = False
+        for node in nodes:
+            node_type = node.get("type", "")
+            if node_type not in subgraphs:
+                continue
+            sg = subgraphs[node_type]
+
+            # Build inner_output_map: group_output_slot → [inner_node_id_str, inner_slot]
+            inner_output_map: dict[int, list] = {}
+            for sg_link in sg.get("links", []):
+                if sg_link.get("target_id") == -20:
+                    inner_output_map[sg_link["target_slot"]] = [
+                        str(sg_link["origin_id"]), sg_link["origin_slot"]
+                    ]
+
+            # Reroute outer output links: group_node[slot] → inner_node[slot]
+            for out_slot, out_data in enumerate(node.get("outputs") or []):
+                if out_slot not in inner_output_map:
+                    continue
+                new_src = inner_output_map[out_slot]
+                for outer_link_id in (out_data.get("links") or []):
+                    if link_map.get(outer_link_id) != new_src:
+                        link_map[outer_link_id] = new_src
+                        changed = True
+        if not changed:
+            break
+
+    logger.debug(f"[{job_id}] Subgraph link_map expansion done in {_pass + 1} pass(es)")
+
+    # -----------------------------------------------------------------------
+    # Phase 2: Build API prompt.
+    # For each node:
+    #   - Regular node → add directly (skip UI-only types)
+    #   - Subgraph node → expand inner nodes
+    # -----------------------------------------------------------------------
+    api_prompt: dict[str, dict] = {}
+
+    def add_node(node: dict, cur_link_map: dict) -> None:
+        """Add one node to api_prompt (skip if UI-only or unrecognised)."""
+        nid   = str(node.get("id", ""))
+        ntype = node.get("type", "")
+        if not ntype or ntype in ("Note", "Reroute"):
+            return
+        if all_info and ntype not in all_info:
+            logger.debug(f"[{job_id}] Skipping UI-only/unknown node {nid} type={ntype!r}")
+            return
+        api_prompt[nid] = {
+            "class_type": ntype,
+            "inputs": build_node_inputs(node, cur_link_map),
         }
+
+    for node in nodes:
+        node_id   = str(node.get("id", ""))
+        node_type = node.get("type", "")
+
+        if node_type in subgraphs:
+            # Expand subgraph: build inner link_map and add inner nodes
+            sg = subgraphs[node_type]
+            outer_inputs = node.get("inputs") or []
+            outer_input_link_ids = [inp.get("link") for inp in outer_inputs]
+
+            # inner_link_map: inner_link_id → [actual_source_node_id, actual_source_slot]
+            inner_link_map: dict[int, list] = {}
+            for sg_link in sg.get("links", []):
+                if sg_link["origin_id"] == -10:
+                    slot = sg_link["origin_slot"]
+                    if slot < len(outer_input_link_ids):
+                        outer_lid = outer_input_link_ids[slot]
+                        if outer_lid is not None and outer_lid in link_map:
+                            inner_link_map[sg_link["id"]] = link_map[outer_lid]
+
+            for inner_node in sg.get("nodes", []):
+                add_node(inner_node, inner_link_map)
+        else:
+            add_node(node, link_map)
 
     return api_prompt
 
