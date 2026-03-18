@@ -319,8 +319,8 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
         if not node_type or node_type in ("Note", "Reroute"):
             continue
 
-        widgets_values = node.get("widgets_values") or []
-        node_inputs    = node.get("inputs") or []
+        raw_wv        = node.get("widgets_values")
+        node_inputs   = node.get("inputs") or []
 
         inputs: dict = {}
 
@@ -330,14 +330,22 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
             if link_id is not None and link_id in link_map:
                 inputs[inp["name"]] = link_map[link_id]
 
-        # Map widget values → input names (in schema order, skipping linked inputs)
-        widget_names = get_widget_names(node_type)
-        widget_idx = 0
-        for wname in widget_names:
-            if wname not in inputs:
-                if widget_idx < len(widgets_values):
-                    inputs[wname] = widgets_values[widget_idx]
-                widget_idx += 1
+        # Map widget values → input names
+        # widgets_values can be a list (index-ordered) or a dict (name→value) in newer exports
+        if isinstance(raw_wv, dict):
+            # Dict format: keys are already input names — merge directly, don't overwrite links
+            for wname, wval in raw_wv.items():
+                if wname not in inputs:
+                    inputs[wname] = wval
+        else:
+            widgets_values = raw_wv or []
+            widget_names = get_widget_names(node_type)
+            widget_idx = 0
+            for wname in widget_names:
+                if wname not in inputs:
+                    if widget_idx < len(widgets_values):
+                        inputs[wname] = widgets_values[widget_idx]
+                    widget_idx += 1
 
         api_prompt[node_id] = {
             "class_type": node_type,
