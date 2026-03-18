@@ -315,8 +315,11 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
         node_id   = str(node.get("id", ""))
         node_type = node.get("type", "")
 
-        # Skip non-executable nodes
+        # Skip non-executable nodes (built-in decorators + any type not registered in ComfyUI)
         if not node_type or node_type in ("Note", "Reroute"):
+            continue
+        if all_info and node_type not in all_info:
+            logger.debug(f"[{job_id}] Skipping UI-only/unknown node {node_id} type={node_type!r}")
             continue
 
         raw_wv        = node.get("widgets_values")
