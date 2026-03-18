@@ -16,15 +16,66 @@
 #   COMFYUI_ARGS       — extra args forwarded to ComfyUI --extra-model-paths etc.
 # =============================================================================
 
-set -euo pipefail
+# Note: no set -e so container stays alive for debugging on failures
+set -uo pipefail
 
 COMFYUI_PATH="${COMFYUI_PATH:-/opt/ComfyUI}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 HANDLER_PORT="${HANDLER_PORT:-8000}"
 SKIP_PROVISIONING="${SKIP_PROVISIONING:-0}"
+START_LOG="/tmp/start.log"
 
-log()  { echo "[start] $*"; }
-die()  { echo "[start][ERROR] $*" >&2; exit 1; }
+log()  { echo "[start] $*" | tee -a "$START_LOG"; }
+err()  { echo "[start][ERROR] $*" | tee -a "$START_LOG" >&2; }
+
+# Redirect all stdout/stderr to log file as well
+exec > >(tee -a "$START_LOG") 2>&1
+
+log "=== Container starting at $(date) ==="
+log "COMFYUI_PATH=$COMFYUI_PATH"
+log "COMFYUI_PORT=$COMFYUI_PORT"
+log "HANDLER_PORT=$HANDLER_PORT"
+log "SKIP_PROVISIONING=$SKIP_PROVISIONING"
+
+# ---------------------------------------------------------------------------
+# Fallback debug HTTP server — starts immediately, serves /tmp/start.log
+# on port 8000 ONLY if the handler isn't started yet.
+# This means on errors you can hit /health and get container logs.
+# ---------------------------------------------------------------------------
+start_debug_server() {
+    python3 -c "
+import http.server, os, time
+
+class DebugHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args): pass  # suppress access log
+    def do_GET(self):
+        try:
+            with open('$START_LOG') as f:
+                body = f.read()
+        except Exception as e:
+            body = 'Log not available: ' + str(e)
+        encoded = body.encode('utf-8', errors='replace')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+server = http.server.HTTPServer(('0.0.0.0', int('$HANDLER_PORT')), DebugHandler)
+server.serve_forever()
+" &
+    DEBUG_SERVER_PID=$!
+    log "Debug HTTP server started on port $HANDLER_PORT (PID: $DEBUG_SERVER_PID)"
+}
+
+kill_debug_server() {
+    if [ -n "${DEBUG_SERVER_PID:-}" ]; then
+        kill "$DEBUG_SERVER_PID" 2>/dev/null || true
+        log "Debug HTTP server stopped"
+    fi
+}
+
+start_debug_server
 
 # ---------------------------------------------------------------------------
 # 1. Provisioning
@@ -33,7 +84,12 @@ if [ "$SKIP_PROVISIONING" = "1" ]; then
     log "SKIP_PROVISIONING=1 — skipping model downloads"
 else
     log "Running provisioning.sh..."
-    bash /opt/provisioning.sh
+    if ! bash /opt/provisioning.sh; then
+        err "provisioning.sh failed — container will stay alive for debugging"
+        err "Check port $HANDLER_PORT for logs"
+        wait  # keep container alive
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -41,7 +97,18 @@ fi
 # ---------------------------------------------------------------------------
 log "Starting ComfyUI on port $COMFYUI_PORT..."
 
+if [ ! -d "$COMFYUI_PATH" ]; then
+    err "ComfyUI directory not found: $COMFYUI_PATH"
+    err "Contents of /opt/: $(ls /opt/ 2>&1)"
+    wait
+    exit 1
+fi
+
 cd "$COMFYUI_PATH"
+log "Working dir: $(pwd)"
+log "Python: $(python --version 2>&1)"
+
+mkdir -p /var/log
 
 python main.py \
     --listen 127.0.0.1 \
@@ -59,14 +126,26 @@ log "ComfyUI started (PID: $COMFYUI_PID)"
 # 3. Wait for ComfyUI to be ready
 # ---------------------------------------------------------------------------
 log "Waiting for ComfyUI to become ready..."
-MAX_WAIT=120
+MAX_WAIT=300
 ELAPSED=0
 
 until curl -sf "http://127.0.0.1:$COMFYUI_PORT/system_stats" > /dev/null 2>&1; do
     if [ $ELAPSED -ge $MAX_WAIT ]; then
-        log "ComfyUI failed to start within ${MAX_WAIT}s. Last log lines:"
-        tail -20 /var/log/comfyui.log >&2
-        die "ComfyUI startup timeout"
+        err "ComfyUI failed to start within ${MAX_WAIT}s"
+        err "=== Last 30 lines of ComfyUI log ==="
+        tail -30 /var/log/comfyui.log | tee -a "$START_LOG" >&2
+        err "Container staying alive for debugging — check port $HANDLER_PORT"
+        wait
+        exit 1
+    fi
+    # Check if ComfyUI process died
+    if ! kill -0 "$COMFYUI_PID" 2>/dev/null; then
+        err "ComfyUI process (PID $COMFYUI_PID) died unexpectedly!"
+        err "=== ComfyUI log ==="
+        cat /var/log/comfyui.log | tee -a "$START_LOG" >&2
+        err "Container staying alive for debugging — check port $HANDLER_PORT"
+        wait
+        exit 1
     fi
     sleep 2
     ELAPSED=$((ELAPSED + 2))
@@ -75,7 +154,8 @@ done
 log "ComfyUI ready after ${ELAPSED}s"
 
 # ---------------------------------------------------------------------------
-# 4. Start handler (foreground — keeps container alive)
+# 4. Start handler (kill debug server first, then start handler in foreground)
 # ---------------------------------------------------------------------------
+kill_debug_server
 log "Starting handler on port $HANDLER_PORT..."
 exec python /opt/handler.py
