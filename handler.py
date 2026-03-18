@@ -353,12 +353,23 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
         else:
             widgets_values = raw_wv or []
             widget_names = get_widget_names(node_type)
-            widget_idx = 0
+            # Some inputs carry `forceInput: True` in the node schema: they are
+            # excluded from object_info (so NOT in widget_names) but still occupy
+            # leading slots in widgets_values.  The UI JSON marks them with a
+            # "widget" field on the input object.  Count them so widget_idx
+            # starts past their reserved positions.
+            widget_names_set = set(widget_names)
+            promoted_not_in_info = sum(
+                1 for inp in (node.get("inputs") or [])
+                if inp.get("widget") is not None
+                and inp["name"] not in widget_names_set
+            )
+            widget_idx = promoted_not_in_info
             for wname in widget_names:
                 if wname not in inputs:
                     if widget_idx < len(widgets_values):
                         inputs[wname] = widgets_values[widget_idx]
-                    widget_idx += 1
+                widget_idx += 1  # always advance — even for linked widget inputs
 
         return inputs
 
@@ -433,11 +444,17 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
             inner_link_map: dict[int, list] = {}
             for sg_link in sg.get("links", []):
                 if sg_link["origin_id"] == -10:
+                    # Boundary input: map outer link → inner link
                     slot = sg_link["origin_slot"]
                     if slot < len(outer_input_link_ids):
                         outer_lid = outer_input_link_ids[slot]
                         if outer_lid is not None and outer_lid in link_map:
                             inner_link_map[sg_link["id"]] = link_map[outer_lid]
+                elif sg_link.get("target_id") != -20:
+                    # Inner-to-inner link (e.g. node240 → node239 inside subgraph)
+                    inner_link_map[sg_link["id"]] = [
+                        str(sg_link["origin_id"]), sg_link["origin_slot"]
+                    ]
 
             for inner_node in sg.get("nodes", []):
                 add_node(inner_node, inner_link_map)
