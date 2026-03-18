@@ -272,9 +272,10 @@ async def _ui_to_api(ui_workflow: dict, client: httpx.AsyncClient, job_id: str) 
     nodes = ui_workflow.get("nodes", [])
     links = ui_workflow.get("links", [])
 
-    # link_id -> [source_node_id, source_output_slot]
+    # link_id -> [source_node_id_str, source_output_slot]
+    # ComfyUI API format uses STRING node IDs in link references: ["node_id", slot_index]
     link_map: dict[int, list] = {
-        link[0]: [link[1], link[2]] for link in links
+        link[0]: [str(link[1]), link[2]] for link in links
     }
 
     # Fetch object_info to resolve widget input names
