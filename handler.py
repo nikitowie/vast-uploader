@@ -159,6 +159,20 @@ async def get_build_info():
 
 
 # ---------------------------------------------------------------------------
+# Debug: convert workflow without submitting
+# ---------------------------------------------------------------------------
+@app.post("/debug/convert")
+async def debug_convert(request: GenerateRequest):
+    """Return the converted API prompt without submitting to ComfyUI. Debug only."""
+    async with httpx.AsyncClient() as client:
+        try:
+            api_workflow = await _prepare_workflow(request.workflow_json, client, "debug")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Conversion failed: {e}")
+    return {"node_count": len(api_workflow), "api_prompt": api_workflow}
+
+
+# ---------------------------------------------------------------------------
 # Main inference endpoint
 # ---------------------------------------------------------------------------
 @app.post("/generate/sync")
