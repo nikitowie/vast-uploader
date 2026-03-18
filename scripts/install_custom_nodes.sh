@@ -90,12 +90,12 @@ clone_node \
 
 # 4. ComfyUI-MMAudio (kijai)
 #    Nodes: MMAudioModelLoader, MMAudioFeatureUtilsLoader
-#    cnr_id: comfyui-mmaudio | commit: 841b307
-#    NOTE: if this repo moves or changes name, update URL here
+#    cnr_id: comfyui-mmaudio | commit: 8eaeb72 (2026-02-01)
+#    Fixes: BigVGAN compatibility with huggingface_hub 1.0+ (PR #61)
 clone_node \
     "https://github.com/kijai/ComfyUI-MMAudio" \
     "ComfyUI-MMAudio" \
-    "841b307095f3cdc448d940a5787bc36706e49f1d"
+    "8eaeb72e3f5cf7a5abae39d9e7f7bf2e51ef83d5"
 
 # 5. ComfyUI-KJNodes (kijai)
 #    Nodes: ColorMatch, ImageResizeKJv2
