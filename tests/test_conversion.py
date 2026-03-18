@@ -159,20 +159,20 @@ MOCK_OBJECT_INFO = {
         }}
     },
 
-    # --- ComfyUI-WanVideoWrapper ---
+    # --- ComfyUI core extra node (comfy_extras/nodes_wan.py) ---
+    # WanImageToVideo has NO model input — model is separate from conditioning.
     "WanImageToVideo": {
         "input": {"required": {
-            "model": ("MODEL",),
-            "clip_vision_output": ("CLIP_VISION_OUTPUT",),
-            "text_encodings_pos": ("CONDITIONING",),
-            "text_encodings_neg": ("CONDITIONING",),
-            "image": ("IMAGE",),
+            "positive": ("CONDITIONING",),
+            "negative": ("CONDITIONING",),
             "vae": ("VAE",),
-            "width": ("INT", {"default": 832, "min": 64, "max": 2048, "step": 16}),
-            "height": ("INT", {"default": 480, "min": 64, "max": 2048, "step": 16}),
-            "num_frames": ("INT", {"default": 81, "min": 1, "max": 257, "step": 4}),
-            "generation_type": (["image_to_video"],),
-            "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0}),
+            "width": ("INT", {"default": 832, "min": 16, "max": 16384, "step": 16}),
+            "height": ("INT", {"default": 480, "min": 16, "max": 16384, "step": 16}),
+            "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
+            "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+        }, "optional": {
+            "clip_vision_output": ("CLIP_VISION_OUTPUT",),
+            "start_image": ("IMAGE",),
         }}
     },
     "NormalizeAudioLoudness": {
@@ -268,7 +268,7 @@ MOCK_OBJECT_INFO = {
     "PromptGenerator": {
         "input": {"required": {
             "context": ("DICT",),
-            "text": ("STRING", {"default": "", "multiline": True}),
+            "prompt": ("STRING", {"default": "", "multiline": True}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                              "control_after_generate": True}),
         }}
@@ -498,7 +498,7 @@ async def run_tests():
     else:
         inp = node_240["inputs"]
         # wv = ['moves sexily, laughs sexily', 716195816920133, 'randomize']
-        check("text = 'moves sexily...'", inp.get("text"), "moves sexily, laughs sexily")
+        check("prompt = 'moves sexily...'", inp.get("prompt"), "moves sexily, laughs sexily")
         check("seed = 716195816920133", inp.get("seed"), 716195816920133)
         # 'randomize' at [2] is control_after_generate → not stored
 
