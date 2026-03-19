@@ -31,7 +31,7 @@ COMFYUI_PATH="${COMFYUI_PATH:-/opt/ComfyUI}"
 
 if mountpoint -q /workspace 2>/dev/null; then
     log "Persistent /workspace volume detected — using /workspace/models as cache"
-    MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-/workspace/models}"
+    MODEL_CACHE_DIR="/workspace/models"  # force override regardless of ENV
     mkdir -p "$MODEL_CACHE_DIR"
     # Redirect ComfyUI models dir to persistent volume
     if [ -d "$COMFYUI_PATH/models" ] && [ ! -L "$COMFYUI_PATH/models" ]; then
