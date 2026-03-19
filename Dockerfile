@@ -55,7 +55,8 @@ RUN pip install --no-cache-dir \
     uvicorn[standard] \
     httpx \
     websockets \
-    pydantic
+    pydantic \
+    runpod
 
 # ---------------------------------------------------------------------------
 # Install custom node dependencies (Python packages)

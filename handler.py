@@ -64,6 +64,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# RunPod SDK — imported lazily only when RUNPOD_ENDPOINT_ID is set
+try:
+    import runpod
+    _RUNPOD_AVAILABLE = True
+except ImportError:
+    _RUNPOD_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -173,17 +180,15 @@ async def debug_convert(request: GenerateRequest):
 
 
 # ---------------------------------------------------------------------------
-# Main inference endpoint
+# Core generate logic (shared by FastAPI endpoint and RunPod handler)
 # ---------------------------------------------------------------------------
-@app.post("/generate/sync")
-async def generate_sync(request: GenerateRequest):
+async def _generate_logic(request: GenerateRequest) -> dict:
     job_id = str(uuid.uuid4())[:8]
     logger.info(f"[{job_id}] New job received")
     t_start = time.time()
 
     async with httpx.AsyncClient() as client:
 
-        # 1. Ensure LoRAs are locally available
         if request.loras:
             logger.info(f"[{job_id}] Ensuring {len(request.loras)} LoRA(s)...")
             for lora in request.loras:
@@ -192,14 +197,12 @@ async def generate_sync(request: GenerateRequest):
                 except RuntimeError as e:
                     raise HTTPException(status_code=400, detail=f"LoRA prep failed: {e}")
 
-        # 2. Detect and convert workflow format (UI → API if needed)
         try:
             api_workflow = await _prepare_workflow(request.workflow_json, client, job_id)
         except Exception as e:
             logger.error(f"[{job_id}] Workflow conversion failed: {e}", exc_info=True)
             raise HTTPException(status_code=400, detail=f"Workflow conversion failed: {e}")
 
-        # 3. Upload input_image and inject into LoadImage nodes
         if request.input_image:
             try:
                 img_filename = await _upload_image_b64(request.input_image, client, job_id)
@@ -212,18 +215,12 @@ async def generate_sync(request: GenerateRequest):
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Image upload failed: {e}")
 
-        # 4. Submit prompt to ComfyUI
         client_id = str(uuid.uuid4())
-        prompt_payload = {
-            "prompt": api_workflow,
-            "client_id": client_id,
-        }
+        prompt_payload = {"prompt": api_workflow, "client_id": client_id}
 
         try:
             resp = await client.post(
-                f"{COMFYUI_URL}/prompt",
-                json=prompt_payload,
-                timeout=30.0,
+                f"{COMFYUI_URL}/prompt", json=prompt_payload, timeout=30.0,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -239,7 +236,6 @@ async def generate_sync(request: GenerateRequest):
 
     logger.info(f"[{job_id}] Submitted — prompt_id={prompt_id}, client_id={client_id}")
 
-    # 5. Wait for completion via WebSocket
     try:
         outputs = await _wait_for_completion(job_id, client_id, prompt_id)
     except asyncio.TimeoutError:
@@ -254,6 +250,14 @@ async def generate_sync(request: GenerateRequest):
         "elapsed_seconds": round(t_elapsed, 1),
         "outputs": outputs,
     }
+
+
+# ---------------------------------------------------------------------------
+# Main inference endpoint
+# ---------------------------------------------------------------------------
+@app.post("/generate/sync")
+async def generate_sync(request: GenerateRequest):
+    return await _generate_logic(request)
 
 
 # ---------------------------------------------------------------------------
@@ -643,15 +647,43 @@ def _guess_mime(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# RunPod Serverless handler
+# ---------------------------------------------------------------------------
+async def _runpod_handler(job: dict) -> dict:
+    """
+    RunPod Serverless entry point.
+    Input:  {"workflow_json": {...}, "input_image": "<b64>", "loras": [...]}
+    Output: {"status": "success", "outputs": [...]} or {"error": "..."}
+    """
+    job_input = job.get("input", {})
+    try:
+        request = GenerateRequest(**job_input)
+        return await _generate_logic(request)
+    except HTTPException as e:
+        logger.error(f"RunPod job failed: {e.detail}")
+        return {"error": e.detail}
+    except Exception as e:
+        logger.error(f"RunPod job error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info(f"Handler starting on port {HANDLER_PORT}")
     logger.info(f"ComfyUI target: {COMFYUI_URL}")
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=HANDLER_PORT,
-        log_level="info",
-        access_log=True,
-    )
+
+    # RunPod Serverless mode — detected by RUNPOD_ENDPOINT_ID env var
+    if os.getenv("RUNPOD_ENDPOINT_ID") and _RUNPOD_AVAILABLE:
+        logger.info("Starting in RunPod Serverless mode")
+        runpod.serverless.start({"handler": _runpod_handler})
+    else:
+        # Vast.ai / standalone HTTP mode
+        logger.info(f"Starting FastAPI handler on port {HANDLER_PORT}")
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=HANDLER_PORT,
+            log_level="info",
+            access_log=True,
+        )
