@@ -111,8 +111,9 @@ class LoraSpec(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    workflow_json: dict
-    input_image: Optional[str] = None   # base64-encoded PNG or JPEG
+    workflow_json: Optional[dict] = None  # full workflow dict (UI or API format)
+    workflow_name: Optional[str] = None   # filename in /opt/ComfyUI/workflows/ (without .json)
+    input_image: Optional[str] = None     # base64-encoded PNG or JPEG
     loras: Optional[list[LoraSpec]] = []
 
 
@@ -171,9 +172,18 @@ async def get_build_info():
 @app.post("/debug/convert")
 async def debug_convert(request: GenerateRequest):
     """Return the converted API prompt without submitting to ComfyUI. Debug only."""
+    workflow_dict = request.workflow_json
+    if workflow_dict is None and request.workflow_name:
+        wf_path = os.path.join(os.environ.get("COMFYUI_PATH", "/opt/ComfyUI"), "workflows", f"{request.workflow_name}.json")
+        if not os.path.exists(wf_path):
+            raise HTTPException(status_code=404, detail=f"Workflow file not found: {wf_path}")
+        with open(wf_path) as f:
+            workflow_dict = json.load(f)
+    if workflow_dict is None:
+        raise HTTPException(status_code=400, detail="Provide workflow_json or workflow_name")
     async with httpx.AsyncClient() as client:
         try:
-            api_workflow = await _prepare_workflow(request.workflow_json, client, "debug")
+            api_workflow = await _prepare_workflow(workflow_dict, client, "debug")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Conversion failed: {e}")
     return {"node_count": len(api_workflow), "api_prompt": api_workflow}
@@ -197,8 +207,23 @@ async def _generate_logic(request: GenerateRequest) -> dict:
                 except RuntimeError as e:
                     raise HTTPException(status_code=400, detail=f"LoRA prep failed: {e}")
 
+        # Resolve workflow: by name (file) or inline JSON
+        workflow_dict = request.workflow_json
+        if workflow_dict is None and request.workflow_name:
+            wf_path = os.path.join(
+                os.environ.get("COMFYUI_PATH", "/opt/ComfyUI"),
+                "workflows",
+                f"{request.workflow_name}.json"
+            )
+            if not os.path.exists(wf_path):
+                raise HTTPException(status_code=404, detail=f"Workflow file not found: {wf_path}")
+            with open(wf_path) as f:
+                workflow_dict = json.load(f)
+        if workflow_dict is None:
+            raise HTTPException(status_code=400, detail="Provide workflow_json or workflow_name")
+
         try:
-            api_workflow = await _prepare_workflow(request.workflow_json, client, job_id)
+            api_workflow = await _prepare_workflow(workflow_dict, client, job_id)
         except Exception as e:
             logger.error(f"[{job_id}] Workflow conversion failed: {e}", exc_info=True)
             raise HTTPException(status_code=400, detail=f"Workflow conversion failed: {e}")

@@ -130,6 +130,7 @@ RUN chmod +x /opt/provisioning.sh /opt/scripts/*.sh 2>/dev/null || true && \
 # Copy workflow for optional local smoke test
 # ---------------------------------------------------------------------------
 COPY workflows/ /opt/ComfyUI/user/default/workflows/
+COPY workflows/ /opt/ComfyUI/workflows/
 
 # ---------------------------------------------------------------------------
 # Build info
