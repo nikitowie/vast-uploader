@@ -96,7 +96,7 @@ COMFYUI_URL  = f"http://{COMFYUI_HOST}:{COMFYUI_PORT}"
 COMFYUI_WS   = f"ws://{COMFYUI_HOST}:{COMFYUI_PORT}"
 
 OUTPUT_DIR      = Path(os.getenv("OUTPUT_DIR", "/opt/ComfyUI/output"))
-MAX_WAIT        = int(os.getenv("MAX_WAIT_SECONDS", "600"))
+MAX_WAIT        = int(os.getenv("MAX_WAIT_SECONDS", "1200"))
 HANDLER_PORT    = int(os.getenv("HANDLER_PORT", "8000"))
 BUILD_INFO_PATH = Path("/opt/build-info.json")
 
