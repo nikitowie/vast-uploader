@@ -60,7 +60,7 @@ from typing import Optional
 import httpx
 import uvicorn
 import websockets
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -121,6 +121,9 @@ class GenerateRequest(BaseModel):
 # FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(title="ComfyUI Serverless Handler", version="1.1.0")
+
+# In-memory job store for async jobs {job_id: {"status": ..., "result": ...}}
+_jobs: dict = {}
 
 
 @app.exception_handler(Exception)
@@ -283,6 +286,36 @@ async def _generate_logic(request: GenerateRequest) -> dict:
 @app.post("/generate/sync")
 async def generate_sync(request: GenerateRequest):
     return await _generate_logic(request)
+
+
+@app.post("/generate/async")
+async def generate_async(request: GenerateRequest, background_tasks: BackgroundTasks):
+    """Start generation in background, return job_id immediately."""
+    job_id = str(uuid.uuid4())[:8]
+    _jobs[job_id] = {"status": "IN_PROGRESS", "result": None, "error": None}
+
+    async def run():
+        try:
+            result = await _generate_logic(request)
+            _jobs[job_id] = {"status": "COMPLETED", "result": result, "error": None}
+        except Exception as e:
+            _jobs[job_id] = {"status": "FAILED", "result": None, "error": str(e)}
+
+    background_tasks.add_task(run)
+    return {"job_id": job_id, "status": "IN_PROGRESS"}
+
+
+@app.get("/status/{job_id}")
+async def job_status(job_id: str):
+    """Poll async job status."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job["status"] == "COMPLETED":
+        return job["result"]
+    if job["status"] == "FAILED":
+        return JSONResponse(status_code=500, content={"status": "error", "error": job["error"]})
+    return {"status": job["status"], "job_id": job_id}
 
 
 # ---------------------------------------------------------------------------
