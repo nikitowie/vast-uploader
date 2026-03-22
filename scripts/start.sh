@@ -93,6 +93,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1b. NVMe acceleration — copy models from network volume to local SSD
+#     /tmp is on local NVMe (~3-7 GB/s) vs network volume (~200-500 MB/s)
+#     Copying ~30GB takes ~10-15s but saves ~250s per generation run
+# ---------------------------------------------------------------------------
+NVME_MODELS="/tmp/nvme_models"
+WORKSPACE_MODELS="/workspace/models"
+
+if mountpoint -q /workspace 2>/dev/null && [ -d "$WORKSPACE_MODELS" ]; then
+    if [ -d "$NVME_MODELS" ] && [ "$(ls -A "$NVME_MODELS" 2>/dev/null)" ]; then
+        log "NVMe cache already populated at $NVME_MODELS — skipping copy"
+    else
+        log "Copying models from network volume to local NVMe..."
+        COPY_START=$(date +%s)
+        mkdir -p "$NVME_MODELS"
+        cp -a "$WORKSPACE_MODELS/." "$NVME_MODELS/"
+        COPY_END=$(date +%s)
+        COPY_ELAPSED=$((COPY_END - COPY_START))
+        COPY_SIZE=$(du -sh "$NVME_MODELS" | cut -f1)
+        log "NVMe copy done: $COPY_SIZE in ${COPY_ELAPSED}s"
+    fi
+
+    # Redirect ComfyUI models to NVMe
+    rm -f "$COMFYUI_PATH/models" 2>/dev/null || rm -rf "$COMFYUI_PATH/models"
+    ln -sfn "$NVME_MODELS" "$COMFYUI_PATH/models"
+    log "Symlinked $COMFYUI_PATH/models → $NVME_MODELS (NVMe)"
+else
+    log "No /workspace volume or no models — ComfyUI will use default model paths"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Start ComfyUI in background
 # ---------------------------------------------------------------------------
 log "Starting ComfyUI on port $COMFYUI_PORT..."
