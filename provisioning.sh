@@ -48,14 +48,19 @@ fi
 
 # ---------------------------------------------------------------------------
 # Create all expected model subdirs
+# Clean up any stale symlinks left by previous NVMe acceleration runs
+# (e.g. diffusion_models → /tmp/nvme_models/... which doesn't exist on fresh pod)
 # ---------------------------------------------------------------------------
 for d in checkpoints vae loras controlnet upscale_models clip_vision \
           ipadapter mmaudio vfi_models text_encoders unet diffusion_models; do
-    mkdir -p "$MODEL_CACHE_DIR/$d"
+    target="$MODEL_CACHE_DIR/$d"
+    # Remove broken symlinks before mkdir
+    if [ -L "$target" ] && [ ! -e "$target" ]; then
+        log "Removing stale symlink: $target"
+        rm -f "$target"
+    fi
+    mkdir -p "$target"
 done
-
-# Ensure all model subdirs exist
-mkdir -p "$MODEL_CACHE_DIR/diffusion_models"
 
 # ---------------------------------------------------------------------------
 # Download helper with resume support
