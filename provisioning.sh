@@ -73,10 +73,18 @@ download_model() {
     local checksum="${4:-}"
 
     local dest="$dest_dir/$filename"
+    local min_size="${5:-1048576}"  # default 1MB minimum
 
     if [ -f "$dest" ]; then
-        log "✓ Already exists: $filename"
-        return 0
+        local actual_size
+        actual_size=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
+        if [ "$actual_size" -ge "$min_size" ]; then
+            log "✓ Already exists: $filename ($(du -sh "$dest" | cut -f1))"
+            return 0
+        else
+            warn "File too small ($actual_size bytes < $min_size), re-downloading: $filename"
+            rm -f "$dest"
+        fi
     fi
 
     if [ -z "$url" ] || [ "$url" = "TODO" ]; then
@@ -151,11 +159,15 @@ mkdir -p "$DIFFUSION_DIR"
 
 download_model "$DIFFUSION_DIR" \
     "smoothMixWan2214BI2V_i2vV20High.safetensors" \
-    "$(civitai_url 'https://civitai.com/api/download/models/2513182?type=Model&format=SafeTensor&size=pruned&fp=fp8')"
+    "$(civitai_url 'https://civitai.com/api/download/models/2513182?type=Model&format=SafeTensor&size=pruned&fp=fp8')" \
+    "" \
+    "13000000000"  # ~14GB expected
 
 download_model "$DIFFUSION_DIR" \
     "smoothMixWan2214BI2V_i2vV20Low.safetensors" \
-    "$(civitai_url 'https://civitai.com/api/download/models/2513186?type=Model&format=SafeTensor&size=pruned&fp=fp8')"
+    "$(civitai_url 'https://civitai.com/api/download/models/2513186?type=Model&format=SafeTensor&size=pruned&fp=fp8')" \
+    "" \
+    "13000000000"  # ~14GB expected
 
 # ---------------------------------------------------------------------------
 # 2. VAE → models/vae/
