@@ -93,66 +93,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 1b. NVMe acceleration — copy heavy models from network volume to local SSD
-#     /tmp is on local NVMe (~3-7 GB/s) vs network volume (~200-500 MB/s)
-#     Only copy diffusion_models (~28GB) — the biggest bottleneck.
-#     Other models (VAE, text_enc, etc.) are small and fine on network volume.
-#     Uses rsync with --drop-cache to avoid filling RAM.
+# 1b. NVMe acceleration — DISABLED
+#     cp/rsync fills Linux page cache → OOM on pods with limited RAM.
+#     TODO: re-enable with O_DIRECT dd or when pods have >= 64GB RAM.
+#     For now, ComfyUI reads directly from network volume.
 # ---------------------------------------------------------------------------
-NVME_CACHE="/tmp/nvme_models"
-WORKSPACE_MODELS="/workspace/models"
-
-if mountpoint -q /workspace 2>/dev/null && [ -d "$WORKSPACE_MODELS" ]; then
-    # Create NVMe cache dir structure matching workspace
-    mkdir -p "$NVME_CACHE/diffusion_models"
-
-    if [ -d "$NVME_CACHE/diffusion_models" ] && [ "$(ls -A "$NVME_CACHE/diffusion_models" 2>/dev/null)" ]; then
-        log "NVMe cache already has diffusion_models — skipping copy"
-    else
-        log "Copying diffusion_models to local NVMe (bypassing page cache)..."
-        COPY_START=$(date +%s)
-        # Use dd-style copy with direct I/O to avoid RAM pressure
-        for f in "$WORKSPACE_MODELS/diffusion_models"/*; do
-            [ -f "$f" ] || continue
-            fname=$(basename "$f")
-            if [ -f "$NVME_CACHE/diffusion_models/$fname" ]; then
-                log "  ✓ $fname already cached"
-            else
-                log "  ↓ Copying $fname..."
-                cp --reflink=auto "$f" "$NVME_CACHE/diffusion_models/$fname"
-                # Drop page cache for this file to free RAM
-                python3 -c "
-import os, ctypes, ctypes.util
-f = os.open('$NVME_CACHE/diffusion_models/$fname', os.O_RDONLY)
-try:
-    libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
-    libc.posix_fadvise(f, 0, 0, 4)  # POSIX_FADV_DONTNEED=4
-finally:
-    os.close(f)
-" 2>/dev/null || true
-            fi
-        done
-        COPY_END=$(date +%s)
-        COPY_ELAPSED=$((COPY_END - COPY_START))
-        COPY_SIZE=$(du -sh "$NVME_CACHE/diffusion_models" | cut -f1)
-        log "NVMe copy done: $COPY_SIZE in ${COPY_ELAPSED}s"
-    fi
-
-    # Symlink only diffusion_models to NVMe, keep rest on network volume
-    if [ -L "$COMFYUI_PATH/models" ]; then
-        # models is already symlinked to /workspace/models by provisioning.sh
-        # Just override diffusion_models subdir
-        rm -rf "$COMFYUI_PATH/models/diffusion_models" 2>/dev/null || true
-        ln -sfn "$NVME_CACHE/diffusion_models" "$COMFYUI_PATH/models/diffusion_models"
-        log "Symlinked diffusion_models → NVMe, rest stays on network volume"
-    elif [ -d "$COMFYUI_PATH/models" ]; then
-        rm -rf "$COMFYUI_PATH/models/diffusion_models" 2>/dev/null || true
-        ln -sfn "$NVME_CACHE/diffusion_models" "$COMFYUI_PATH/models/diffusion_models"
-        log "Symlinked diffusion_models → NVMe"
-    fi
-else
-    log "No /workspace volume or no models — ComfyUI will use default model paths"
-fi
+log "NVMe acceleration disabled — reading models from network volume"
 
 # ---------------------------------------------------------------------------
 # 2. Start ComfyUI in background
